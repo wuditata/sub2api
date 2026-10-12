@@ -11,6 +11,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/servertiming"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
@@ -22,8 +23,18 @@ type S3BackupStore struct {
 }
 
 // NewS3BackupStoreFactory returns a BackupObjectStoreFactory that creates S3-backed stores
-func NewS3BackupStoreFactory() service.BackupObjectStoreFactory {
+// for S3 configs and local-filesystem stores for local configs. The local root
+// comes from cfg (BACKUP_LOCAL_DIR / DATA_DIR), resolved the same way the
+// service layer does.
+func NewS3BackupStoreFactory(cfg *config.Config) service.BackupObjectStoreFactory {
+	var backupCfg config.BackupConfig
+	if cfg != nil {
+		backupCfg = cfg.Backup
+	}
 	return func(ctx context.Context, cfg *service.BackupS3Config) (service.BackupObjectStore, error) {
+		if cfg.IsLocal() {
+			return NewLocalBackupStore(service.ResolveBackupLocalDir(&backupCfg)), nil
+		}
 		client, err := newS3Client(ctx, s3ClientParams{
 			Endpoint:        cfg.Endpoint,
 			Region:          cfg.Region,
