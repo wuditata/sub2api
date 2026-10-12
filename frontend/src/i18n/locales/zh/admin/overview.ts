@@ -83,7 +83,18 @@ export default {
 
     backup: {
       title: '数据库备份',
-      description: '全量数据库备份到 S3 兼容存储，支持定时备份与恢复',
+      description: '全量数据库备份到 S3 兼容存储或本地磁盘，支持定时备份与恢复',
+      storage: {
+        title: '备份存储',
+        descriptionPrefix: '选择备份文件的存放位置：S3 兼容存储（支持',
+        descriptionSuffix: '）或本地磁盘',
+        typeS3: 'S3 兼容存储',
+        typeLocal: '本地磁盘',
+        localDirLabel: '备份目录（服务端解析结果）：',
+        localDirUnknown: '未知 — 请检查服务端配置',
+        localDirEnvHint: '目录可通过环境变量 BACKUP_LOCAL_DIR 修改，默认使用 $DATA_DIR/backups。',
+        persistenceWarning: '该目录必须位于持久化存储（如挂载卷）上；容器临时目录中的备份会在重新部署时丢失。'
+      },
       s3: {
         title: 'S3 存储配置',
         description: '配置 S3 兼容存储（支持 Cloudflare R2）',
@@ -108,6 +119,7 @@ export default {
         description: '开启后，异步生图接口可用，生成结果转存到对象存储，只把短链接写入 Redis。与备份共用同一套 S3 客户端，保存后立即生效，无需重启。',
         enabled: '启用异步生图',
         reuseBackupS3: '复用上方备份的 S3 配置（只用不同的存储桶/前缀）',
+        reuseUnavailableLocal: '备份存储为本地磁盘时不可用，请在下方单独配置 S3 凭证',
         bucket: '存储桶',
         bucketInherited: '留空则沿用备份存储桶',
         prefix: 'Key 前缀',

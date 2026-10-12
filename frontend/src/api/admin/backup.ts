@@ -1,6 +1,9 @@
 import { apiClient } from '../client'
 
+export type BackupStorageType = 's3' | 'local'
+
 export interface BackupS3Config {
+  storage_type?: BackupStorageType // 缺省 = 's3'（兼容旧配置）
   endpoint: string
   region: string
   bucket: string
@@ -8,6 +11,7 @@ export interface BackupS3Config {
   secret_access_key?: string
   prefix: string
   force_path_style: boolean
+  local_dir?: string // 只读回显：服务端解析出的本地备份根目录
 }
 
 export interface BackupScheduleConfig {

@@ -1,49 +1,72 @@
 <template>
     <div class="space-y-6">
-      <!-- S3 Storage Config -->
+      <!-- Storage Config (S3 / local filesystem) -->
       <div class="card p-6">
         <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div>
             <h3 class="text-base font-semibold text-gray-900 dark:text-white">
-              {{ t('admin.backup.s3.title') }}
+              {{ t('admin.backup.storage.title') }}
             </h3>
             <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-              {{ t('admin.backup.s3.descriptionPrefix') }}
+              {{ t('admin.backup.storage.descriptionPrefix') }}
               <button type="button" class="text-primary-600 underline hover:text-primary-700 dark:text-primary-400 dark:hover:text-primary-300" @click="showR2Guide = true">Cloudflare R2</button>
-              {{ t('admin.backup.s3.descriptionSuffix') }}
+              {{ t('admin.backup.storage.descriptionSuffix') }}
             </p>
           </div>
         </div>
-        <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
-          <div>
-            <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">{{ t('admin.backup.s3.endpoint') }}</label>
-            <input v-model="s3Form.endpoint" class="input w-full" placeholder="https://<account_id>.r2.cloudflarestorage.com" />
-          </div>
-          <div>
-            <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">{{ t('admin.backup.s3.region') }}</label>
-            <input v-model="s3Form.region" class="input w-full" placeholder="auto" />
-          </div>
-          <div>
-            <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">{{ t('admin.backup.s3.bucket') }}</label>
-            <input v-model="s3Form.bucket" class="input w-full" />
-          </div>
-          <div>
-            <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">{{ t('admin.backup.s3.prefix') }}</label>
-            <input v-model="s3Form.prefix" class="input w-full" placeholder="backups/" />
-          </div>
-          <div>
-            <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">{{ t('admin.backup.s3.accessKeyId') }}</label>
-            <input v-model="s3Form.access_key_id" class="input w-full" />
-          </div>
-          <div>
-            <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">{{ t('admin.backup.s3.secretAccessKey') }}</label>
-            <input v-model="s3Form.secret_access_key" type="password" class="input w-full" :placeholder="s3SecretConfigured ? t('admin.backup.s3.secretConfigured') : ''" />
-          </div>
-          <label class="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300 md:col-span-2">
-            <input v-model="s3Form.force_path_style" type="checkbox" />
-            <span>{{ t('admin.backup.s3.forcePathStyle') }}</span>
+
+        <div class="mb-4 flex flex-wrap gap-6">
+          <label class="flex cursor-pointer items-center gap-3">
+            <input v-model="s3Form.storage_type" type="radio" value="s3" class="h-4 w-4" />
+            <span class="text-sm text-gray-700 dark:text-gray-300">{{ t('admin.backup.storage.typeS3') }}</span>
+          </label>
+          <label class="flex cursor-pointer items-center gap-3">
+            <input v-model="s3Form.storage_type" type="radio" value="local" class="h-4 w-4" />
+            <span class="text-sm text-gray-700 dark:text-gray-300">{{ t('admin.backup.storage.typeLocal') }}</span>
           </label>
         </div>
+
+        <template v-if="!isLocalStorage">
+          <div class="grid grid-cols-1 gap-3 md:grid-cols-2" data-testid="backup-s3-fields">
+            <div>
+              <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">{{ t('admin.backup.s3.endpoint') }}</label>
+              <input v-model="s3Form.endpoint" class="input w-full" placeholder="https://<account_id>.r2.cloudflarestorage.com" />
+            </div>
+            <div>
+              <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">{{ t('admin.backup.s3.region') }}</label>
+              <input v-model="s3Form.region" class="input w-full" placeholder="auto" />
+            </div>
+            <div>
+              <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">{{ t('admin.backup.s3.bucket') }}</label>
+              <input v-model="s3Form.bucket" class="input w-full" />
+            </div>
+            <div>
+              <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">{{ t('admin.backup.s3.prefix') }}</label>
+              <input v-model="s3Form.prefix" class="input w-full" placeholder="backups/" />
+            </div>
+            <div>
+              <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">{{ t('admin.backup.s3.accessKeyId') }}</label>
+              <input v-model="s3Form.access_key_id" class="input w-full" />
+            </div>
+            <div>
+              <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">{{ t('admin.backup.s3.secretAccessKey') }}</label>
+              <input v-model="s3Form.secret_access_key" type="password" class="input w-full" :placeholder="s3SecretConfigured ? t('admin.backup.s3.secretConfigured') : ''" />
+            </div>
+            <label class="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300 md:col-span-2">
+              <input v-model="s3Form.force_path_style" type="checkbox" />
+              <span>{{ t('admin.backup.s3.forcePathStyle') }}</span>
+            </label>
+          </div>
+        </template>
+
+        <template v-else>
+          <div class="rounded-md bg-blue-50 p-4 text-sm text-blue-700 dark:bg-blue-900/30 dark:text-blue-300">
+            <p>{{ t('admin.backup.storage.localDirLabel') }}<code class="mx-1 rounded bg-blue-100 px-1.5 py-0.5 font-mono text-xs dark:bg-blue-900/60">{{ s3Form.local_dir || t('admin.backup.storage.localDirUnknown') }}</code></p>
+            <p class="mt-2">{{ t('admin.backup.storage.localDirEnvHint') }}</p>
+            <p class="mt-2 font-medium">{{ t('admin.backup.storage.persistenceWarning') }}</p>
+          </div>
+        </template>
+
         <div class="mt-4 flex flex-wrap gap-2">
           <button type="button" class="btn btn-secondary btn-sm" :disabled="testingS3" @click="testS3">
             {{ testingS3 ? t('common.loading') : t('admin.backup.s3.testConnection') }}
@@ -71,10 +94,21 @@
           </label>
         </div>
 
-        <label class="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
-          <input v-model="imageStorageForm.reuse_backup_s3" type="checkbox" />
+        <label
+          class="inline-flex items-center gap-2 text-sm"
+          :class="isLocalStorage ? 'cursor-not-allowed text-gray-400 dark:text-gray-500' : 'text-gray-700 dark:text-gray-300'"
+        >
+          <input
+            v-model="imageStorageForm.reuse_backup_s3"
+            type="checkbox"
+            :disabled="isLocalStorage"
+            @change="onReuseBackupS3Change"
+          />
           <span>{{ t('admin.backup.imageStorage.reuseBackupS3') }}</span>
         </label>
+        <p v-if="isLocalStorage" class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+          {{ t('admin.backup.imageStorage.reuseUnavailableLocal') }}
+        </p>
 
         <div class="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
           <div>
@@ -445,8 +479,9 @@ function reportStepUpBlocked(error: unknown): boolean {
   return true
 }
 
-// S3 config
+// S3 / local storage config
 const s3Form = ref<BackupS3Config>({
+  storage_type: 's3',
   endpoint: '',
   region: 'auto',
   bucket: '',
@@ -454,10 +489,20 @@ const s3Form = ref<BackupS3Config>({
   secret_access_key: '',
   prefix: 'backups/',
   force_path_style: false,
+  local_dir: '',
 })
+const isLocalStorage = computed(() => s3Form.value.storage_type === 'local')
 const s3SecretConfigured = ref(false)
 const savingS3 = ref(false)
 const testingS3 = ref(false)
+
+// 备份存储切到本地后，图片存储无法再复用备份 S3 凭证；强制取消勾选，
+// 由后端 Update 兜底拒绝（ErrImageStorageReuseNotS3）。
+function onReuseBackupS3Change() {
+  if (isLocalStorage.value && imageStorageForm.value.reuse_backup_s3) {
+    imageStorageForm.value.reuse_backup_s3 = false
+  }
+}
 
 // Async image object storage. Shares the S3 client with backups, so the default is
 // to reuse the credentials configured above and only differ by prefix.
@@ -657,6 +702,7 @@ async function loadS3Config() {
   try {
     const cfg = await adminAPI.backup.getS3Config()
     s3Form.value = {
+      storage_type: cfg.storage_type || 's3',
       endpoint: cfg.endpoint || '',
       region: cfg.region || 'auto',
       bucket: cfg.bucket || '',
@@ -664,8 +710,13 @@ async function loadS3Config() {
       secret_access_key: '',
       prefix: cfg.prefix || 'backups/',
       force_path_style: cfg.force_path_style,
+      local_dir: cfg.local_dir || '',
     }
     s3SecretConfigured.value = Boolean(cfg.access_key_id)
+    // 备份存储已是本地时，复用勾选不可用且必须关闭。
+    if (s3Form.value.storage_type === 'local' && imageStorageForm.value.reuse_backup_s3) {
+      imageStorageForm.value.reuse_backup_s3 = false
+    }
   } catch (error) {
     appStore.showError((error as { message?: string })?.message || t('errors.networkError'))
   }
@@ -696,6 +747,10 @@ async function loadImageStorageConfig() {
       prefix: config.prefix || 'images/',
       region: config.region || 'auto',
       secret_access_key: '',
+    }
+    // 加载顺序上本函数可能晚于 loadS3Config，需再次确保本地备份模式下复用勾选关闭。
+    if (isLocalStorage.value && imageStorageForm.value.reuse_backup_s3) {
+      imageStorageForm.value.reuse_backup_s3 = false
     }
     imageStorageSecretConfigured.value = secret_configured
   } catch (error) {
