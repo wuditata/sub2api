@@ -18,6 +18,9 @@ const settingKeyImageStorageConfig = "image_storage_config"
 // ErrImageStorageIncomplete 表示开关已打开但凭证不全，无法启用异步生图。
 var ErrImageStorageIncomplete = errors.New("image storage is enabled but bucket/access_key_id/secret_access_key are incomplete")
 
+// ErrImageStorageReuseNotS3 表示备份存储已切到本地文件系统，无法复用其凭证。
+var ErrImageStorageReuseNotS3 = errors.New("image storage cannot reuse the backup storage configuration: backup storage is not S3")
+
 // ImageStorageFactory 由 repository 层提供，把配置变成一个可用的对象存储实现。
 // 与 BackupObjectStoreFactory 同样的注入方式，避免 service 反向依赖 repository。
 type ImageStorageFactory func(ctx context.Context, cfg *config.ImageStorageConfig) (ImageStorage, error)
@@ -168,6 +171,10 @@ func (s *ImageStorageSettingService) Update(ctx context.Context, in ImageStorage
 	normalizeImageStorageSettings(&in)
 
 	if in.ReuseBackupS3 {
+		// 备份存储为本地文件系统时没有可复用的 S3 凭证。
+		if backupCfg, err := s.backupCredentials(ctx); err == nil && backupCfg != nil && backupCfg.IsLocal() {
+			return nil, ErrImageStorageReuseNotS3
+		}
 		// 复用备份凭证时不落自己的密钥，避免同一份密钥在库里存两份。
 		in.Endpoint, in.Region, in.AccessKeyID, in.SecretAccessKey = "", "", "", ""
 		in.ForcePathStyle = false
@@ -259,6 +266,11 @@ func (s *ImageStorageSettingService) toImageStorageConfig(ctx context.Context, i
 		}
 		if backupCfg == nil {
 			return nil, errors.New("image storage is set to reuse the backup S3 configuration, but no backup S3 configuration exists")
+		}
+		// 备份存储切到本地文件系统后没有可复用的 S3 凭证；保存时由 Update 拦截，
+		// 这里兜底防止旧配置在切换后继续生效。
+		if backupCfg.IsLocal() {
+			return nil, ErrImageStorageReuseNotS3
 		}
 		cfg.Endpoint = backupCfg.Endpoint
 		cfg.Region = backupCfg.Region

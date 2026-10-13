@@ -132,4 +132,7 @@ func registerRoutes(
 	routes.RegisterPaymentRoutes(v1, h.Payment, h.PaymentWebhook, h.Admin.Payment, jwtAuth, adminAuth, auditLog, settingService, panelRateLimiter, redisClient)
 
 	handler.RegisterPageRoutes(v1, cfg.Pricing.DataDir, gin.HandlerFunc(jwtAuth), gin.HandlerFunc(adminAuth), settingService)
+
+	// 本地备份的公开下载路由：鉴权由 URL 内的 HMAC 签名承担（见 BackupService）。
+	handler.RegisterBackupFileRoutes(v1, h.BackupFile)
 }

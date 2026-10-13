@@ -5,6 +5,7 @@ import BackupView from '../BackupView.vue'
 
 const {
   getS3Config,
+  updateS3Config,
   getImageStorageConfig,
   getSchedule,
   updateSchedule,
@@ -13,6 +14,7 @@ const {
   getDownloadURL,
 } = vi.hoisted(() => ({
   getS3Config: vi.fn(),
+  updateS3Config: vi.fn(),
   getImageStorageConfig: vi.fn(),
   getSchedule: vi.fn(),
   updateSchedule: vi.fn(),
@@ -25,7 +27,7 @@ vi.mock('@/api', () => ({
   adminAPI: {
     backup: {
       getS3Config,
-      updateS3Config: vi.fn(),
+      updateS3Config,
       testS3Connection: vi.fn(),
       getImageStorageConfig,
       updateImageStorageConfig: vi.fn(),
@@ -298,5 +300,63 @@ describe('admin BackupView', () => {
     await button.trigger('click')
     await flushPromises()
     expect(deleteBackup).toHaveBeenCalledWith('archived', true)
+  })
+
+  it('默认渲染 S3 表单；旧配置无 storage_type 也按 S3 处理', async () => {
+    getS3Config.mockResolvedValue({
+      endpoint: 'https://r2.example.test', region: 'auto', bucket: 'b',
+      access_key_id: 'ak', prefix: 'backups/', force_path_style: false,
+    })
+    const wrapper = mountBackupView()
+    await flushPromises()
+
+    const s3Radio = wrapper.find('input[type="radio"][value="s3"]')
+    const localRadio = wrapper.find('input[type="radio"][value="local"]')
+    expect((s3Radio.element as HTMLInputElement).checked).toBe(true)
+    expect((localRadio.element as HTMLInputElement).checked).toBe(false)
+    // S3 模式渲染备份存储的 S3 字段，不渲染本地目录提示。
+    expect(wrapper.find('[data-testid="backup-s3-fields"]').exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('admin.backup.storage.localDirLabel')
+  })
+
+  it('切换到本地存储：隐藏 S3 表单、展示目录与持久化提示、禁用图片存储复用勾选', async () => {
+    getS3Config.mockResolvedValue({
+      storage_type: 'local', endpoint: '', region: '', bucket: '',
+      access_key_id: '', prefix: '', force_path_style: false,
+      local_dir: '/app/data/backups',
+    })
+    getImageStorageConfig.mockResolvedValue({
+      config: { enabled: false, reuse_backup_s3: true, bucket: '', prefix: 'images/' },
+      secret_configured: false,
+    })
+    const wrapper = mountBackupView()
+    await flushPromises()
+
+    // 本地模式：备份存储的 S3 字段隐藏，目录信息可见。
+    expect(wrapper.find('[data-testid="backup-s3-fields"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('/app/data/backups')
+    expect(wrapper.text()).toContain('admin.backup.storage.persistenceWarning')
+
+    // 复用备份 S3 的勾选被强制关闭并禁用。
+    const reuseCheckbox = wrapper.find('input[type="checkbox"][disabled]')
+    expect((reuseCheckbox.element as HTMLInputElement).checked).toBe(false)
+    expect(wrapper.text()).toContain('admin.backup.imageStorage.reuseUnavailableLocal')
+    // 图片存储的 S3 凭证表单因复用被关闭而展开。
+    expect(wrapper.findAll('input[placeholder="https://<account_id>.r2.cloudflarestorage.com"]').length).toBe(1)
+  })
+
+  it('本地模式下保存会把 storage_type=local 提交给原端点', async () => {
+    updateS3Config.mockReset().mockResolvedValue({} as never)
+    getS3Config.mockResolvedValue({
+      storage_type: 'local', endpoint: '', region: '', bucket: '',
+      access_key_id: '', prefix: '', force_path_style: false, local_dir: '/data/backups',
+    })
+    const wrapper = mountBackupView()
+    await flushPromises()
+
+    await wrapper.findAll('button').find(button => button.text().includes('common.save'))!.trigger('click')
+    await flushPromises()
+
+    expect(updateS3Config).toHaveBeenCalledWith(expect.objectContaining({ storage_type: 'local' }))
   })
 })

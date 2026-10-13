@@ -3,6 +3,7 @@ package service
 import (
 	"compress/gzip"
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -10,7 +11,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -32,6 +35,19 @@ const (
 
 	backupObjectCleanupTimeout = 2 * time.Minute
 
+	// BackupStorageTypeS3 / BackupStorageTypeLocal 是 BackupS3Config.StorageType
+	// 的合法取值。空串等价于 s3：该字段引入前落库的旧配置没有这个键。
+	BackupStorageTypeS3    = "s3"
+	BackupStorageTypeLocal = "local"
+
+	// backupDownloadPath 是本地备份的公开下载路由（HMAC 自验证，无会话鉴权）。
+	// 与 handler 包中注册的实际路径保持一致。
+	backupDownloadPath = "/api/v1/backups/download"
+
+	// backupDownloadURLTTL 是签名下载 URL 的有效期，与 S3 预签名 URL 的
+	// 1 小时保持一致。
+	backupDownloadURLTTL = 1 * time.Hour
+
 	// backupScheduledLeaderLockKey gates the scheduled full-database backup so
 	// that only one instance in a clustered deployment performs the
 	// dump-and-upload each cycle. Without it every instance runs the cron
@@ -49,13 +65,17 @@ const (
 )
 
 var (
-	ErrBackupS3NotConfigured  = infraerrors.BadRequest("BACKUP_S3_NOT_CONFIGURED", "backup S3 storage is not configured")
-	ErrBackupNotFound         = infraerrors.NotFound("BACKUP_NOT_FOUND", "backup record not found")
-	ErrBackupInProgress       = infraerrors.Conflict("BACKUP_IN_PROGRESS", "a backup is already in progress")
-	ErrRestoreInProgress      = infraerrors.Conflict("RESTORE_IN_PROGRESS", "a restore is already in progress")
-	ErrBackupRecordsCorrupt   = infraerrors.InternalServer("BACKUP_RECORDS_CORRUPT", "backup records data is corrupted")
-	ErrBackupS3ConfigCorrupt  = infraerrors.InternalServer("BACKUP_S3_CONFIG_CORRUPT", "backup S3 config data is corrupted")
-	ErrBackupArchiveProtected = infraerrors.Conflict("BACKUP_ARCHIVE_PROTECTED", "explicit confirmation is required to delete an archived backup")
+	ErrBackupS3NotConfigured    = infraerrors.BadRequest("BACKUP_S3_NOT_CONFIGURED", "backup S3 storage is not configured")
+	ErrBackupNotFound           = infraerrors.NotFound("BACKUP_NOT_FOUND", "backup record not found")
+	ErrBackupInProgress         = infraerrors.Conflict("BACKUP_IN_PROGRESS", "a backup is already in progress")
+	ErrRestoreInProgress        = infraerrors.Conflict("RESTORE_IN_PROGRESS", "a restore is already in progress")
+	ErrBackupRecordsCorrupt     = infraerrors.InternalServer("BACKUP_RECORDS_CORRUPT", "backup records data is corrupted")
+	ErrBackupS3ConfigCorrupt    = infraerrors.InternalServer("BACKUP_S3_CONFIG_CORRUPT", "backup S3 config data is corrupted")
+	ErrBackupArchiveProtected   = infraerrors.Conflict("BACKUP_ARCHIVE_PROTECTED", "explicit confirmation is required to delete an archived backup")
+	ErrInvalidBackupStorageType = infraerrors.BadRequest(
+		"INVALID_BACKUP_STORAGE_TYPE",
+		"storage_type must be either \"s3\" or \"local\"",
+	)
 
 	// ErrSecretEncryptionKeyNotConfigured is returned when an S3 SecretAccessKey
 	// would be encrypted with an auto-generated (ephemeral) key. That key is
@@ -93,19 +113,36 @@ type BackupObjectStoreFactory func(ctx context.Context, cfg *BackupS3Config) (Ba
 
 // ─── 数据模型 ───
 
-// BackupS3Config S3 兼容存储配置（支持 Cloudflare R2）
+// BackupS3Config 备份存储配置。历史上只有 S3 一种后端，字段名沿用至今；
+// StorageType 为 "local" 时 S3 字段被忽略，对象落到本地磁盘存储。
 type BackupS3Config struct {
-	Endpoint        string `json:"endpoint"` // e.g. https://<account_id>.r2.cloudflarestorage.com
-	Region          string `json:"region"`   // R2 用 "auto"
+	StorageType     string `json:"storage_type,omitempty"` // "s3"（默认/空）或 "local"
+	Endpoint        string `json:"endpoint"`               // e.g. https://<account_id>.r2.cloudflarestorage.com
+	Region          string `json:"region"`                 // R2 用 "auto"
 	Bucket          string `json:"bucket"`
 	AccessKeyID     string `json:"access_key_id"`
 	SecretAccessKey string `json:"secret_access_key,omitempty"` //nolint:revive // field name follows AWS convention
 	Prefix          string `json:"prefix"`                      // S3 key 前缀，如 "backups/"
 	ForcePathStyle  bool   `json:"force_path_style"`
+	// LocalDir 仅供 GET 回显，展示服务端解析出的本地备份根目录；不接受
+	// PUT 提交（路径属于部署配置，不落库）。
+	LocalDir string `json:"local_dir,omitempty"`
 }
 
-// IsConfigured 检查必要字段是否已配置
+// IsLocal 报告配置是否选择本地文件系统后端。空 StorageType 视为 S3（兼容旧数据）。
+func (c *BackupS3Config) IsLocal() bool {
+	return c != nil && c.StorageType == BackupStorageTypeLocal
+}
+
+// IsConfigured 检查必要字段是否已配置。本地后端由部署配置（env/默认值）解析
+// 目录，不需要任何 DB 字段即视为已配置。
 func (c *BackupS3Config) IsConfigured() bool {
+	if c == nil {
+		return false
+	}
+	if c.IsLocal() {
+		return true
+	}
 	return c.Bucket != "" && c.AccessKeyID != "" && c.SecretAccessKey != ""
 }
 
@@ -165,6 +202,12 @@ type BackupService struct {
 	encryptionKeyConfigured bool
 	storeFactory            BackupObjectStoreFactory
 	dumper                  DBDumper
+	// downloadHMACKey 派生自 jwt.secret，用于给本地备份的公开下载 URL 签名。
+	// 签名 URL 是本地模式下下载的唯一鉴权手段，密钥与登录会话同生命周期。
+	downloadHMACKey []byte
+	// localDirRoot 是本地备份存储的根目录（已解析绝对路径），供 GetS3Config
+	// 回显和签名 URL 生成使用。目录本身由 store factory 解析，这里只存值。
+	localDirRoot string
 
 	opMu      sync.Mutex // 保护 backingUp/restoring 标志
 	backingUp bool
@@ -210,6 +253,8 @@ func NewBackupService(
 		encryptionKeyConfigured: cfg.Totp.EncryptionKeyConfigured,
 		storeFactory:            storeFactory,
 		dumper:                  dumper,
+		downloadHMACKey:         deriveBackupDownloadHMACKey(cfg.JWT.Secret),
+		localDirRoot:            ResolveBackupLocalDir(&cfg.Backup),
 		bgCtx:                   bgCtx,
 		bgCancel:                bgCancel,
 		partSizeBytes:           defaultBackupPartSizeBytes,
@@ -384,17 +429,28 @@ func (s *BackupService) GetS3Config(ctx context.Context) (*BackupS3Config, error
 		return nil, err
 	}
 	if cfg == nil {
-		return &BackupS3Config{}, nil
+		cfg = &BackupS3Config{}
 	}
 	// 脱敏返回
 	cfg.SecretAccessKey = ""
+	if cfg.IsLocal() {
+		cfg.LocalDir = s.localDirRoot
+	}
 	return cfg, nil
 }
 
 func (s *BackupService) UpdateS3Config(ctx context.Context, cfg BackupS3Config) (*BackupS3Config, error) {
+	if cfg.StorageType != "" && cfg.StorageType != BackupStorageTypeS3 && cfg.StorageType != BackupStorageTypeLocal {
+		return nil, ErrInvalidBackupStorageType
+	}
+	if cfg.StorageType == "" {
+		cfg.StorageType = BackupStorageTypeS3
+	}
+	cfg.LocalDir = "" // 只读回显字段，不落库
+
 	// 如果没提供 secret，保留原有值。loadS3Config 会解密，所以这里拿到的是明文，
 	// 和调用方新填的 secret 一样，都必须走下面的加密再落库。
-	if cfg.SecretAccessKey == "" {
+	if cfg.SecretAccessKey == "" && !cfg.IsLocal() {
 		old, _ := s.loadS3Config(ctx)
 		if old != nil {
 			cfg.SecretAccessKey = old.SecretAccessKey
@@ -405,8 +461,7 @@ func (s *BackupService) UpdateS3Config(ctx context.Context, cfg BackupS3Config) 
 	// 后本函数会清空返回值里的 secret，所以第二次保存（改端点、存定时配置）送上来的
 	// secret 是空的，会走上面的分支继承旧值。若那条路径跳过加密，明文就会覆盖掉库里
 	// 的密文，而读取侧“兼容未加密旧数据”的回退会把这件事永久掩盖成一条日志。
-	if cfg.SecretAccessKey != "" {
-		// 拒绝用自动生成的临时密钥加密：该密钥每次重启都会变化，落库的密文在
+	if cfg.SecretAccessKey != "" { // 拒绝用自动生成的临时密钥加密：该密钥每次重启都会变化，落库的密文在
 		// 重启/升级后无法解密（#4524）。与支付、TOTP 的处理保持一致。
 		if !s.encryptionKeyConfigured {
 			return nil, ErrSecretEncryptionKeyNotConfigured
@@ -433,16 +488,27 @@ func (s *BackupService) UpdateS3Config(ctx context.Context, cfg BackupS3Config) 
 	s.storeMu.Unlock()
 
 	cfg.SecretAccessKey = ""
+	if cfg.IsLocal() {
+		cfg.LocalDir = s.localDirRoot
+	}
 	return &cfg, nil
 }
 
 func (s *BackupService) TestS3Connection(ctx context.Context, cfg BackupS3Config) error {
 	// 如果没提供 secret，用已保存的
-	if cfg.SecretAccessKey == "" {
+	if cfg.SecretAccessKey == "" && !cfg.IsLocal() {
 		old, _ := s.loadS3Config(ctx)
 		if old != nil {
 			cfg.SecretAccessKey = old.SecretAccessKey
 		}
+	}
+
+	if cfg.IsLocal() {
+		store, err := s.storeFactory(ctx, &cfg)
+		if err != nil {
+			return err
+		}
+		return store.HeadBucket(ctx)
 	}
 
 	if cfg.Bucket == "" || cfg.AccessKeyID == "" || cfg.SecretAccessKey == "" {
@@ -1265,7 +1331,8 @@ func (s *BackupService) deleteBackup(ctx context.Context, backupID string, delet
 	return s.saveRecordsLocked(ctx, remaining)
 }
 
-// GetBackupDownloadURL 获取备份文件预签名下载 URL
+// GetBackupDownloadURL 获取备份文件下载 URL。S3 模式返回预签名 URL；本地模式
+// 返回带 HMAC 签名的相对 URL，由公开下载路由（backupDownloadPath）验证并流出文件。
 func (s *BackupService) GetBackupDownloadURL(ctx context.Context, backupID string) (BackupDownloadResponse, error) {
 	var download BackupDownloadResponse
 	record, err := s.GetBackupRecord(ctx, backupID)
@@ -1280,6 +1347,31 @@ func (s *BackupService) GetBackupDownloadURL(ctx context.Context, backupID strin
 	if err != nil {
 		return download, err
 	}
+
+	if s3Cfg.IsLocal() {
+		exp := time.Now().Add(backupDownloadURLTTL).Unix()
+		if len(record.Parts) > 0 {
+			parts := append([]BackupPart(nil), record.Parts...)
+			sort.Slice(parts, func(i, j int) bool { return parts[i].Index < parts[j].Index })
+			for i, part := range parts {
+				if part.Index != i+1 || part.S3Key == "" || part.SizeBytes <= 0 {
+					return download, fmt.Errorf("invalid backup part metadata at index %d", i+1)
+				}
+				download.Parts = append(download.Parts, BackupDownloadPart{
+					Index:     part.Index,
+					SizeBytes: part.SizeBytes,
+					URL:       s.signedDownloadURL(record.ID, part.Index, exp),
+				})
+			}
+			return download, nil
+		}
+		if record.S3Key == "" {
+			return download, errors.New("backup object key is empty")
+		}
+		download.URL = s.signedDownloadURL(record.ID, 0, exp)
+		return download, nil
+	}
+
 	objectStore, err := s.getOrCreateStore(ctx, s3Cfg)
 	if err != nil {
 		return download, err
@@ -1617,4 +1709,120 @@ func deleteBackupObjectKeys(ctx context.Context, objectStore BackupObjectStore, 
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// ─── 本地备份下载（签名 URL + 公开路由取流） ───
+
+// ResolveBackupLocalDir 解析本地备份存储根目录：
+// cfg.Backup.LocalDir > $DATA_DIR/backups > ./data/backups。
+// 与 resolvePluginRootDir 的回退规则保持一致。
+func ResolveBackupLocalDir(cfg *config.BackupConfig) string {
+	if cfg != nil && strings.TrimSpace(cfg.LocalDir) != "" {
+		return filepath.Clean(strings.TrimSpace(cfg.LocalDir))
+	}
+	base := strings.TrimSpace(os.Getenv("DATA_DIR"))
+	if base == "" {
+		base = "./data"
+	}
+	return filepath.Join(base, "backups")
+}
+
+// deriveBackupDownloadHMACKey 从 jwt.secret 派生下载签名密钥。域名化分隔 +
+// SHA-256 使备份下载签名与 JWT 签名密钥在密码学上隔离：泄露一侧不波及另一侧。
+func deriveBackupDownloadHMACKey(jwtSecret string) []byte {
+	h := sha256.New()
+	h.Write([]byte("sub2api:backup-download:"))
+	h.Write([]byte(jwtSecret))
+	return h.Sum(nil)
+}
+
+func (s *BackupService) backupDownloadMAC(recordID string, part int, exp int64) []byte {
+	mac := hmac.New(sha256.New, s.downloadHMACKey)
+	fmt.Fprintf(mac, "%s|%d|%d", recordID, part, exp)
+	return mac.Sum(nil)
+}
+
+// signedDownloadURL 生成一条本地备份的限时签名下载 URL（相对路径，前端 <a href>
+// 直接可用）。part=0 表示单文件备份本体；part>0 对应分卷序号。
+func (s *BackupService) signedDownloadURL(recordID string, part int, exp int64) string {
+	sig := hex.EncodeToString(s.backupDownloadMAC(recordID, part, exp))
+	return fmt.Sprintf("%s?id=%s&part=%d&exp=%d&sig=%s", backupDownloadPath, url.QueryEscape(recordID), part, exp, sig)
+}
+
+// BackupDownloadRequest 是公开下载路由解析出的请求参数。
+type BackupDownloadRequest struct {
+	RecordID string
+	Part     int
+	Exp      int64
+	Sig      string
+}
+
+// VerifyBackupDownload 校验签名下载请求：签名匹配（常量时间比较）且未过期。
+// 这是该路由的唯一鉴权手段，过期窗口按生成时的 exp 判定。
+func (s *BackupService) VerifyBackupDownload(req BackupDownloadRequest) error {
+	if req.RecordID == "" || req.Sig == "" || req.Exp <= 0 {
+		return infraerrors.BadRequest("BACKUP_DOWNLOAD_INVALID", "malformed backup download request")
+	}
+	sig, err := hex.DecodeString(req.Sig)
+	if err != nil {
+		return infraerrors.BadRequest("BACKUP_DOWNLOAD_INVALID", "malformed backup signature")
+	}
+	if !hmac.Equal(sig, s.backupDownloadMAC(req.RecordID, req.Part, req.Exp)) {
+		return infraerrors.BadRequest("BACKUP_DOWNLOAD_INVALID", "backup download signature mismatch")
+	}
+	if time.Now().Unix() >= req.Exp {
+		return infraerrors.BadRequest("BACKUP_DOWNLOAD_EXPIRED", "backup download link has expired")
+	}
+	return nil
+}
+
+// OpenBackupPayload 打开本地备份的负载文件供流式下载。part=0 返回单文件备份本体；
+// part>0 返回对应分卷。文件名用于 Content-Disposition（分卷追加 .part-NNNNNN 后缀）。
+func (s *BackupService) OpenBackupPayload(ctx context.Context, req BackupDownloadRequest) (io.ReadCloser, string, error) {
+	record, err := s.GetBackupRecord(ctx, req.RecordID)
+	if err != nil {
+		return nil, "", err
+	}
+	if record.Status != "completed" {
+		return nil, "", infraerrors.BadRequest("BACKUP_NOT_COMPLETED", "backup is not completed")
+	}
+
+	s3Cfg, err := s.loadS3Config(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	if !s3Cfg.IsLocal() {
+		return nil, "", infraerrors.BadRequest("BACKUP_DOWNLOAD_NOT_LOCAL", "backup storage is not local")
+	}
+
+	objectStore, err := s.getOrCreateStore(ctx, s3Cfg)
+	if err != nil {
+		return nil, "", fmt.Errorf("init object store: %w", err)
+	}
+
+	var key string
+	fileName := record.FileName
+	if req.Part > 0 {
+		for i := range record.Parts {
+			if record.Parts[i].Index == req.Part {
+				key = record.Parts[i].S3Key
+				break
+			}
+		}
+		if key == "" {
+			return nil, "", infraerrors.NotFound("BACKUP_PART_NOT_FOUND", "backup part not found")
+		}
+		fileName = fmt.Sprintf("%s.part-%06d", record.FileName, req.Part)
+	} else {
+		key = record.S3Key
+	}
+	if key == "" {
+		return nil, "", errors.New("backup object key is empty")
+	}
+
+	body, err := objectStore.Download(ctx, key)
+	if err != nil {
+		return nil, "", err
+	}
+	return body, fileName, nil
 }

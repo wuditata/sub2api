@@ -83,7 +83,18 @@ export default {
 
     backup: {
       title: 'Database Backup',
-      description: 'Full database backup to S3-compatible storage with scheduled backup and restore',
+      description: 'Full database backup to S3-compatible or local storage with scheduled backup and restore',
+      storage: {
+        title: 'Backup Storage',
+        descriptionPrefix: 'Choose where backup files are stored: S3-compatible storage (supports',
+        descriptionSuffix: ') or the local filesystem',
+        typeS3: 'S3-compatible storage',
+        typeLocal: 'Local filesystem',
+        localDirLabel: 'Backup directory (resolved on the server):',
+        localDirUnknown: 'unknown — check server configuration',
+        localDirEnvHint: 'Set the BACKUP_LOCAL_DIR environment variable to change the directory; it defaults to $DATA_DIR/backups.',
+        persistenceWarning: 'The directory must be on persistent storage (e.g. a mounted volume). Backups on ephemeral container storage are lost on redeploy.'
+      },
       s3: {
         title: 'S3 Storage Configuration',
         description: 'Configure S3-compatible storage (supports Cloudflare R2)',
@@ -108,6 +119,7 @@ export default {
         description: 'Enables the asynchronous image endpoints and offloads generated images to object storage, keeping only short links in Redis. Shares the S3 client with backups and takes effect on save — no restart needed.',
         enabled: 'Enable async image tasks',
         reuseBackupS3: 'Reuse the backup S3 configuration above (different bucket/prefix only)',
+        reuseUnavailableLocal: 'Unavailable while backup storage is set to local filesystem — configure S3 credentials below',
         bucket: 'Bucket',
         bucketInherited: 'Leave empty to use the backup bucket',
         prefix: 'Key prefix',

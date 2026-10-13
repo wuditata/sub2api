@@ -106,6 +106,7 @@ type Config struct {
 	BatchImage              BatchImageConfig              `mapstructure:"batch_image"`
 	ImageStorage            ImageStorageConfig            `mapstructure:"image_storage"`
 	Plugins                 PluginConfig                  `mapstructure:"plugins"`
+	Backup                  BackupConfig                  `mapstructure:"backup"`
 
 	// Enforce only API-key spending windows in simple mode.
 	SimpleModeKeyRateLimitEnabled bool `mapstructure:"simple_mode_key_rate_limit_enabled" yaml:"simple_mode_key_rate_limit_enabled"`
@@ -125,6 +126,14 @@ type PluginConfig struct {
 	MaxUploadBytes       int64             `mapstructure:"max_upload_bytes"`
 	MaxUncompressedBytes int64             `mapstructure:"max_uncompressed_bytes"`
 	StartTimeoutSeconds  int               `mapstructure:"start_timeout_seconds"`
+}
+
+// BackupConfig 控制备份功能的进程级配置。存储类型本身（S3/本地）是管理后台
+// 里的运行时设置，存在 settings 表；这里只放无法安全开放给 UI 的路径配置。
+type BackupConfig struct {
+	// LocalDir 是本地备份存储后端的根目录。为空时按 DATA_DIR/backups、
+	// ./data/backups 顺序回退（与 plugin 包的解析规则一致）。
+	LocalDir string `mapstructure:"local_dir"`
 }
 
 type LogConfig struct {
@@ -2354,6 +2363,9 @@ func setDefaults() {
 	viper.SetDefault("plugins.max_upload_bytes", int64(128*1024*1024))
 	viper.SetDefault("plugins.max_uncompressed_bytes", int64(256*1024*1024))
 	viper.SetDefault("plugins.start_timeout_seconds", 15)
+
+	// 备份。存储类型（S3/本地）是运行时管理设置；这里只放本地备份目录。
+	viper.SetDefault("backup.local_dir", "")
 
 	// Timezone (default to Asia/Shanghai for Chinese users)
 	viper.SetDefault("timezone", "Asia/Shanghai")
